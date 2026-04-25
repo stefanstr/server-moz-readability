@@ -28,7 +28,7 @@ npm install server-moz-readability
 ## Tool Reference
 
 ### `parse`
-Fetches and transforms webpage content into clean Markdown.
+Fetches and transforms webpage content into cleaned article output.
 
 **Arguments:**
 ```json
@@ -37,6 +37,15 @@ Fetches and transforms webpage content into clean Markdown.
     "type": "string",
     "description": "The website URL to parse",
     "required": true
+  },
+  "format": {
+    "type": "string",
+    "enum": ["html", "markdown", "text"],
+    "description": "Optional output format. Defaults to markdown."
+  },
+  "maxChars": {
+    "type": "integer",
+    "description": "Optional character limit applied after rendering."
   }
 }
 ```
@@ -45,11 +54,13 @@ Fetches and transforms webpage content into clean Markdown.
 ```json
 {
   "title": "Article title",
-  "content": "Markdown content...",
+  "content": "Rendered article content...",
   "metadata": {
+    "format": "markdown",
     "excerpt": "Brief summary",
     "byline": "Author information",
-    "siteName": "Source website name"
+    "siteName": "Source website name",
+    "truncated": false
   }
 }
 ```
