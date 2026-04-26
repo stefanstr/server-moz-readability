@@ -1,6 +1,6 @@
 {
   "name": "make-content-parsable",
-  "version": "1.0.3",
+  "version": "2.0.0",
   "description": "Extract clean, parsable content from web URLs, including readable pages and public Reddit posts.",
   "license": "MIT",
   "author": "Max Zimmer (emzimmer.com)",
