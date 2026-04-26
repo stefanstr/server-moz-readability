@@ -20,10 +20,12 @@ Unlike simple fetch requests, this server:
 
 ## Installation
 
-### Install from npm
+### Run from GitHub
 ```bash
-npm install make-content-parsable
+npx -y --package github:stefanstr/make-content-parsable -- make-content-parsable
 ```
+
+This package is distributed directly from GitHub and is not currently published to the npm registry.
 
 ## Tool Reference
 
@@ -79,7 +81,7 @@ Add to your `claude_desktop_config.json`:
   "mcpServers": {
     "make-content-parsable": {
       "command": "npx",
-      "args": ["-y", "make-content-parsable"]
+      "args": ["-y", "--package", "github:stefanstr/make-content-parsable", "--", "make-content-parsable"]
     }
   }
 }

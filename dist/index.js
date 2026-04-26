@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ErrorCode, McpError, ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -478,7 +479,15 @@ export async function startServer() {
   await server.connect(transport);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+export function isDirectCliRun(metaUrl, argvPath = process.argv[1]) {
+  if (!argvPath) {
+    return false;
+  }
+
+  return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argvPath);
+}
+
+if (isDirectCliRun(import.meta.url)) {
   startServer().catch(error => {
     console.error(`Server failed to start: ${error.message}`);
     process.exit(1);

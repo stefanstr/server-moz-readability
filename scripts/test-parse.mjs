@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   RedditParser,
   TOOL_NAME,
   WebContentParser,
   WebsiteParser,
+  isDirectCliRun,
   isRedditUrl,
   renderArticleContent,
   renderRedditContent,
@@ -116,6 +120,18 @@ test("WebsiteParser fetchAndParse returns common metadata and supports maxChars"
 test("only extract_web_content is advertised as the public tool name", () => {
   assert.equal(TOOL_NAME, "extract_web_content");
   assert.notEqual(TOOL_NAME, "extract_article_content");
+});
+
+test("CLI entrypoint detection works through npm bin symlinks", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "make-content-parsable-"));
+  const linkPath = join(tempDir, "make-content-parsable");
+
+  try {
+    symlinkSync(new URL("../dist/index.js", import.meta.url), linkPath);
+    assert.equal(isDirectCliRun(new URL("../dist/index.js", import.meta.url).href, linkPath), true);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("isRedditUrl detects supported Reddit hosts", () => {
