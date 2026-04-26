@@ -1,15 +1,15 @@
 {
-  "name": "server-moz-readability",
+  "name": "make-content-parsable",
   "version": "1.0.3",
-  "description": "Fetch just the main content and convert it to markdown. Strips away all the junk, which is cleaner for LLMs and reduces your overall context window.",
+  "description": "Extract clean, parsable content from web URLs, including readable pages and public Reddit posts.",
   "license": "MIT",
   "author": "Max Zimmer (emzimmer.com)",
-  "homepage": "https://github.com/emzimmer/server-moz-readability",
-  "bugs": "https://github.com/emzimmer/server-moz-readability/issues",
+  "homepage": "https://github.com/stefanstr/make-content-parsable",
+  "bugs": "https://github.com/stefanstr/make-content-parsable/issues",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "server-moz-readability": "./dist/index.js"
+    "make-content-parsable": "./dist/index.js"
   },
   "scripts": {
     "start": "node ./dist/index.js",
