@@ -920,7 +920,7 @@ const parser = new WebContentParser();
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [{
     name: TOOL_NAME,
-    description: "Use this when the user asks you to read, summarize, quote, analyze, or extract readable content from a web URL. For normal web pages it uses Mozilla Readability to remove ads/navigation/page chrome. For public Reddit URLs it uses Reddit JSON and returns the post plus top comments. Prefer this over generic web fetching when the LLM needs clean rendered content rather than raw HTML.",
+    description: "Use this for Reddit threads and article/webpage URLs when the user asks to read, summarize, quote, analyze, compare, or extract source material. Returns clean Markdown, HTML, or plain text plus metadata. For Reddit URLs, returns the post and top comments. Prefer this over generic web fetching when clean readable content is more useful than raw HTML or full page chrome.",
     inputSchema: {
       type: "object",
       properties: {
