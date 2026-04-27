@@ -444,6 +444,47 @@ test("fetchWithPolicy reports oversized responses as public errors", async () =>
   );
 });
 
+test("fetchWithPolicy normalizes timeout failures", async () => {
+  const axiosError = Object.assign(new Error("timeout of 10000ms exceeded"), {
+    name: "AxiosError",
+    code: "ECONNABORTED"
+  });
+
+  await assert.rejects(
+    () => fetchWithPolicy("https://example.com/slow", {
+      requester: async () => {
+        throw axiosError;
+      }
+    }),
+    error => {
+      assert.ok(error instanceof PublicError);
+      assert.equal(error.message, "Request timed out");
+      return true;
+    }
+  );
+});
+
+test("fetchWithPolicy normalizes low-level fetch failures", async () => {
+  const axiosError = Object.assign(new Error("getaddrinfo ENOTFOUND example.invalid"), {
+    name: "AxiosError",
+    code: "ENOTFOUND"
+  });
+
+  await assert.rejects(
+    () => fetchWithPolicy("https://example.invalid/story", {
+      requester: async () => {
+        throw axiosError;
+      }
+    }),
+    error => {
+      assert.ok(error instanceof PublicError);
+      assert.equal(error.message, "Failed to fetch web content");
+      assert.doesNotMatch(error.message, /ENOTFOUND|example\.invalid/);
+      return true;
+    }
+  );
+});
+
 test("fetchWithPolicy blocks redirects to private hosts", async () => {
   const requestedUrls = [];
 
@@ -463,6 +504,34 @@ test("fetchWithPolicy blocks redirects to private hosts", async () => {
   );
 
   assert.deepEqual(requestedUrls, ["https://example.com/start"]);
+});
+
+test("fetchWithPolicy reports redirect loops with a stable message", async () => {
+  const requestedUrls = [];
+
+  await assert.rejects(
+    () => fetchWithPolicy("https://example.com/start", {
+      maxRedirects: 1,
+      requester: async (url) => {
+        requestedUrls.push(url);
+        return {
+          status: 302,
+          headers: { location: "/next" },
+          data: ""
+        };
+      }
+    }),
+    error => {
+      assert.ok(error instanceof PublicError);
+      assert.equal(error.message, "Too many redirects");
+      return true;
+    }
+  );
+
+  assert.deepEqual(requestedUrls, [
+    "https://example.com/start",
+    "https://example.com/next"
+  ]);
 });
 
 test("fetchWithPolicy follows fixture redirect chain and returns the final HTML response", async () => {
@@ -503,6 +572,55 @@ test("fetchWithPolicy rejects unsupported content types before parsing", async (
       requester: async () => fixtureResponse
     }),
     /Unsupported response content type/
+  );
+});
+
+test("WebsiteParser reports invalid and non-HTML URLs with stable messages", async () => {
+  const parser = new WebsiteParser({
+    httpClient: (url, options) => fetchWithPolicy(url, {
+      ...options,
+      requester: async () => loadJsonFixture("non-html-response.json")
+    })
+  });
+
+  await assert.rejects(
+    () => parser.fetchArticle("not a url"),
+    error => {
+      assert.ok(error instanceof PublicError);
+      assert.equal(error.message, "Invalid URL");
+      return true;
+    }
+  );
+
+  await assert.rejects(
+    () => parser.fetchArticle("https://example.com/file.pdf"),
+    error => {
+      assert.ok(error instanceof PublicError);
+      assert.equal(error.message, "Non-HTML response");
+      return true;
+    }
+  );
+});
+
+test("WebsiteParser reports parser failures separately from fetch failures", async () => {
+  class ThrowingParser extends WebsiteParser {
+    async fetchHtml() {
+      return "<html><body><article>Story body</article></body></html>";
+    }
+
+    extractArticle() {
+      throw new Error("readability crashed");
+    }
+  }
+
+  await assert.rejects(
+    () => new ThrowingParser().fetchArticle("https://example.com/story"),
+    error => {
+      assert.ok(error instanceof PublicError);
+      assert.equal(error.message, "Failed to parse web content");
+      assert.doesNotMatch(error.message, /readability crashed/);
+      return true;
+    }
   );
 });
 
