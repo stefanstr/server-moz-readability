@@ -1,0 +1,18 @@
+[
+  {
+    "url": "file:///etc/passwd",
+    "message": "URL must use http or https"
+  },
+  {
+    "url": "http://localhost:3000/admin",
+    "message": "Private or local hosts are blocked by policy: localhost"
+  },
+  {
+    "url": "http://127.0.0.1:3000/admin",
+    "message": "Private or local hosts are blocked by policy: 127.0.0.1"
+  },
+  {
+    "url": "http://[::1]/private",
+    "message": "Private or local hosts are blocked by policy: ::1"
+  }
+]
