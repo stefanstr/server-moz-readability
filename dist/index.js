@@ -20,11 +20,13 @@ const turndownService = new TurndownService({
 });
 
 const SUPPORTED_FORMATS = new Set(['html', 'markdown', 'text']);
+const SUPPORTED_EXCERPT_MODES = new Set(['start', 'best']);
 export const TOOL_NAME = 'extract_web_content';
 const SERVER_VERSION = '2.0.0';
 const USER_AGENT = `make-content-parsable/${SERVER_VERSION} (+https://github.com/stefanstr/make-content-parsable)`;
 const UNLIMITED_MAX_CHARS = -1;
 const DEFAULT_MAX_CHARS = 50_000;
+const DEFAULT_EXCERPT_MODE = 'start';
 const REDDIT_COMMENT_LIMIT = 20;
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
@@ -120,6 +122,191 @@ export function truncateRenderedContent(content, maxChars) {
 
   return {
     content: content.slice(0, limit),
+    truncated: true
+  };
+}
+
+const BOILERPLATE_TERMS = [
+  'advertisement',
+  'cookie',
+  'cookies',
+  'newsletter',
+  'read more',
+  'related',
+  'share',
+  'sign in',
+  'sponsored',
+  'subscribe'
+];
+
+function normalizeScoringText(value) {
+  return normalizeWhitespace(value.toLowerCase());
+}
+
+function titleKeywords(title) {
+  return new Set(normalizeScoringText(title ?? '')
+    .split(/[^a-z0-9]+/)
+    .filter(word => word.length >= 4));
+}
+
+function splitRenderedBlocks(content, format = 'markdown') {
+  const blocks = [];
+  const pattern = /\S[\s\S]*?(?=\n{2,}|$)/g;
+  let match;
+
+  while ((match = pattern.exec(content)) !== null) {
+    const text = match[0].trim();
+
+    if (text) {
+      blocks.push(text);
+    }
+
+    if (match.index === pattern.lastIndex) {
+      pattern.lastIndex += 1;
+    }
+  }
+
+  if (format === 'text' && blocks.length <= 1) {
+    return (content.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g) ?? [])
+      .map(block => block.trim())
+      .filter(Boolean);
+  }
+
+  return blocks;
+}
+
+function scoreRenderedBlock(block, {
+  index,
+  titleWords
+}) {
+  const normalized = normalizeScoringText(block);
+  const words = normalized.split(/[^a-z0-9]+/).filter(Boolean);
+  const wordCount = words.length;
+  const sentenceCount = (block.match(/[.!?](?:\s|$)/g) ?? []).length;
+  const markdownLinkCount = (block.match(/\[[^\]]+\]\([^)]+\)/g) ?? []).length;
+  const urlCount = (block.match(/https?:\/\/\S+/g) ?? []).length;
+  const headingSignal = /^#{1,6}\s+\S/.test(block) ? 4 : 0;
+  const listLineCount = block.split('\n').filter(line => /^\s*(?:[-*]|\d+\.)\s+/.test(line)).length;
+  const boilerplateHits = BOILERPLATE_TERMS.filter(term => normalized.includes(term)).length;
+  const titleOverlap = words.filter(word => titleWords.has(word)).length;
+
+  let score = 0;
+  score += Math.min(wordCount, 80) * 0.7;
+  score += sentenceCount * 14;
+  score += titleOverlap * 8;
+  score += headingSignal;
+
+  if (wordCount >= 18) {
+    score += 15;
+  }
+
+  if (wordCount < 8) {
+    score -= 16;
+  }
+
+  if (listLineCount > 0) {
+    score += Math.min(listLineCount, 6) * 3;
+  }
+
+  score -= markdownLinkCount * 16;
+  score -= urlCount * 12;
+  score -= boilerplateHits * 36;
+
+  if (index <= 1 && wordCount < 20) {
+    score -= 10;
+  }
+
+  return score;
+}
+
+function buildBestContentWindow(blocks, bestIndex, maxChars) {
+  const selected = [blocks[bestIndex]];
+  let length = selected[0].length;
+
+  if (bestIndex > 0 && /^#{1,6}\s+\S/.test(blocks[bestIndex - 1])) {
+    const previous = blocks[bestIndex - 1];
+    const nextLength = length + previous.length + 2;
+
+    if (nextLength <= maxChars) {
+      selected.unshift(previous);
+      length = nextLength;
+    }
+  }
+
+  for (let index = bestIndex + 1; index < blocks.length; index += 1) {
+    const nextLength = length + blocks[index].length + 2;
+
+    if (nextLength > maxChars) {
+      break;
+    }
+
+    selected.push(blocks[index]);
+    length = nextLength;
+  }
+
+  let result = selected.join('\n\n');
+
+  if (result.length > maxChars) {
+    result = result.slice(0, maxChars);
+  }
+
+  return result;
+}
+
+export function selectRenderedContentWindow(content, {
+  maxChars,
+  excerptMode = DEFAULT_EXCERPT_MODE,
+  format = 'markdown',
+  title = ''
+} = {}) {
+  if (!SUPPORTED_EXCERPT_MODES.has(excerptMode)) {
+    throw new Error('excerptMode must be one of: start, best');
+  }
+
+  if (excerptMode === 'start' || format === 'html') {
+    return truncateRenderedContent(content, maxChars);
+  }
+
+  const limit = maxChars ?? DEFAULT_MAX_CHARS;
+
+  if (!Number.isInteger(limit) || limit < UNLIMITED_MAX_CHARS) {
+    throw new Error('maxChars must be an integer greater than or equal to -1');
+  }
+
+  if (limit === UNLIMITED_MAX_CHARS) {
+    return { content, truncated: false };
+  }
+
+  if (content.length <= limit) {
+    return { content, truncated: false };
+  }
+
+  if (limit === 0) {
+    return { content: '', truncated: true };
+  }
+
+  const blocks = splitRenderedBlocks(content, format);
+
+  if (blocks.length === 0) {
+    return truncateRenderedContent(content, limit);
+  }
+
+  const titleWords = titleKeywords(title);
+  const scoredBlocks = blocks.map((block, index) => ({
+    block,
+    index,
+    score: scoreRenderedBlock(block, { index, titleWords })
+  }));
+  const best = scoredBlocks.reduce((currentBest, candidate) => (
+    candidate.score > currentBest.score ? candidate : currentBest
+  ));
+
+  if (best.score <= 0) {
+    return truncateRenderedContent(content, limit);
+  }
+
+  return {
+    content: buildBestContentWindow(blocks, best.index, limit),
     truncated: true
   };
 }
@@ -360,7 +547,12 @@ export async function fetchWithPolicy(url, {
 function shapeWebResponse(article, url, options = {}) {
   const format = options.format ?? 'markdown';
   const renderedContent = renderArticleContent(article, format);
-  const { content, truncated } = truncateRenderedContent(renderedContent, options.maxChars);
+  const { content, truncated } = selectRenderedContentWindow(renderedContent, {
+    maxChars: options.maxChars,
+    excerptMode: options.excerptMode,
+    format,
+    title: article.title
+  });
 
   return {
     title: article.title,
@@ -745,6 +937,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           type: "integer",
           minimum: -1,
           description: "Optional maximum number of characters to return after rendering. Defaults to 50000. Use -1 for no limit."
+        },
+        excerptMode: {
+          type: "string",
+          enum: ["start", "best"],
+          description: "Controls how returned web article content is selected when maxChars truncates output. Defaults to start. For Reddit and HTML output, best currently behaves like start."
         }
       },
       required: ["url"]
@@ -772,11 +969,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     throw new McpError(ErrorCode.InvalidParams, "maxChars must be an integer greater than or equal to -1");
   }
 
+  if (args.excerptMode != null && !SUPPORTED_EXCERPT_MODES.has(args.excerptMode)) {
+    throw new McpError(ErrorCode.InvalidParams, "excerptMode must be one of: start, best");
+  }
+
   try {
     const url = args.url.trim();
     const result = await parser.fetchAndParse(url, {
       format: args.format,
-      maxChars: args.maxChars
+      maxChars: args.maxChars,
+      excerptMode: args.excerptMode
     });
     
     return {

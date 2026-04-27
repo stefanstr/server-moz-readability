@@ -14,6 +14,7 @@ import {
   isRedditUrl,
   renderArticleContent,
   renderRedditContent,
+  selectRenderedContentWindow,
   truncateRenderedContent
 } from "../dist/index.js";
 
@@ -39,6 +40,10 @@ function loadFixture(name) {
 
 function loadJsonFixture(name) {
   return JSON.parse(loadFixture(name));
+}
+
+function loadDoc(name) {
+  return readFileSync(new URL(`../docs/${name}`, import.meta.url), "utf8");
 }
 
 function escapeRegExp(value) {
@@ -143,6 +148,143 @@ test("WebsiteParser extracts representative HTML fixtures across formats and tru
     assert.equal(textResult.metadata.format, "text");
     assert.equal(textResult.metadata.truncated, true);
   }
+});
+
+test("excerpt mode research fixtures document surviving article boilerplate", async () => {
+  const parser = new WebsiteParser({
+    httpClient: async () => ({
+      data: loadFixture("surviving-boilerplate-intro.html"),
+      finalUrl: "https://example.com/cooling-centers/maps",
+      headers: { "content-type": "text/html" }
+    })
+  });
+
+  const result = await parser.fetchAndParse("https://example.com/cooling-centers/maps", {
+    format: "markdown",
+    maxChars: 140
+  });
+
+  assert.equal(result.title, "Cooling Centers Need Better Maps");
+  assert.equal(result.metadata.truncated, true);
+  assert.match(result.content, /Subscribe to the Civic Field Notes newsletter/);
+  assert.doesNotMatch(result.content, /Heat response teams need maps/);
+});
+
+test("WebsiteParser excerptMode start preserves simple truncation", async () => {
+  const parser = new WebsiteParser({
+    httpClient: async () => ({
+      data: loadFixture("surviving-boilerplate-intro.html"),
+      finalUrl: "https://example.com/cooling-centers/maps",
+      headers: { "content-type": "text/html" }
+    })
+  });
+
+  const defaultResult = await parser.fetchAndParse("https://example.com/cooling-centers/maps", {
+    format: "markdown",
+    maxChars: 140
+  });
+  const startResult = await parser.fetchAndParse("https://example.com/cooling-centers/maps", {
+    format: "markdown",
+    maxChars: 140,
+    excerptMode: "start"
+  });
+
+  assert.equal(startResult.content, defaultResult.content);
+  assert.equal(startResult.metadata.truncated, true);
+});
+
+test("WebsiteParser excerptMode best skips surviving article boilerplate", async () => {
+  const parser = new WebsiteParser({
+    httpClient: async () => ({
+      data: loadFixture("surviving-boilerplate-intro.html"),
+      finalUrl: "https://example.com/cooling-centers/maps",
+      headers: { "content-type": "text/html" }
+    })
+  });
+
+  const result = await parser.fetchAndParse("https://example.com/cooling-centers/maps", {
+    format: "markdown",
+    maxChars: 140,
+    excerptMode: "best"
+  });
+
+  assert.equal(result.metadata.truncated, true);
+  assert.doesNotMatch(result.content, /Subscribe to the Civic Field Notes newsletter/);
+  assert.doesNotMatch(result.content, /Advertisement: sponsored/);
+  assert.match(result.content, /Heat response teams need maps/);
+  assert.ok(result.content.length <= 140);
+});
+
+test("WebsiteParser excerptMode best can select a useful text sentence", async () => {
+  const parser = new WebsiteParser({
+    httpClient: async () => ({
+      data: loadFixture("surviving-boilerplate-intro.html"),
+      finalUrl: "https://example.com/cooling-centers/maps",
+      headers: { "content-type": "text/html" }
+    })
+  });
+
+  const result = await parser.fetchAndParse("https://example.com/cooling-centers/maps", {
+    format: "text",
+    maxChars: 140,
+    excerptMode: "best"
+  });
+
+  assert.equal(result.metadata.truncated, true);
+  assert.doesNotMatch(result.content, /Subscribe to the Civic Field Notes newsletter/);
+  assert.match(result.content, /Heat response teams need maps/);
+  assert.ok(result.content.length <= 140);
+});
+
+test("selectRenderedContentWindow best respects edge limits and html fallback", () => {
+  const content = [
+    "Subscribe to our newsletter and share this related story.",
+    "The planning team published a careful map that explains cooling access, backup power, water, and transit options."
+  ].join("\n\n");
+
+  assert.deepEqual(selectRenderedContentWindow(content, {
+    maxChars: -1,
+    excerptMode: "best",
+    title: "Cooling Access Map"
+  }), {
+    content,
+    truncated: false
+  });
+
+  assert.deepEqual(selectRenderedContentWindow(content, {
+    maxChars: 0,
+    excerptMode: "best",
+    title: "Cooling Access Map"
+  }), {
+    content: "",
+    truncated: true
+  });
+
+  assert.deepEqual(selectRenderedContentWindow("<p>abcdef</p>", {
+    maxChars: 4,
+    excerptMode: "best",
+    format: "html"
+  }), {
+    content: "<p>a",
+    truncated: true
+  });
+
+  assert.throws(
+    () => selectRenderedContentWindow(content, { excerptMode: "middle" }),
+    /excerptMode must be one of: start, best/
+  );
+});
+
+test("excerpt mode design note records the chosen API and heuristic direction", () => {
+  const note = loadDoc("excerpt-modes.md");
+
+  assert.match(note, /excerptMode/);
+  assert.match(note, /"start"/);
+  assert.match(note, /"best"/);
+  assert.match(note, /content\.slice\(0, maxChars\)/);
+  assert.match(note, /metadata\.excerpt/);
+  assert.match(note, /surviving-boilerplate-intro\.html/);
+  assert.match(note, /excerptMode must be one of: start, best/);
 });
 
 test("renderArticleContent returns markdown by default", () => {

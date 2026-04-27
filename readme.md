@@ -50,11 +50,16 @@ Use this when the user asks the model to read, summarize, quote, analyze, or ext
     "type": "integer",
     "minimum": -1,
     "description": "Optional character limit applied after rendering. Defaults to 50000. Use -1 for no limit."
+  },
+  "excerptMode": {
+    "type": "string",
+    "enum": ["start", "best"],
+    "description": "Optional partial-output mode used when maxChars truncates web article content. Defaults to start."
   }
 }
 ```
 
-Fetched responses are capped at 5 MiB. If a response exceeds that limit, the tool returns a clear error instead of trying to parse the oversized body. Rendered content is capped at 50,000 characters by default before response formatting; pass `maxChars: -1` to return rendered content without this output cap.
+Fetched responses are capped at 5 MiB. If a response exceeds that limit, the tool returns a clear error instead of trying to parse the oversized body. Rendered content is capped at 50,000 characters by default before response formatting; pass `maxChars: -1` to return rendered content without this output cap. Use `excerptMode: "start"` for simple beginning-of-content truncation, or `excerptMode: "best"` to prefer a high-signal Markdown/text article window when Readability leaves boilerplate near the start. HTML output and Reddit currently use start-style truncation.
 
 **Returns:**
 ```json
