@@ -1,0 +1,18 @@
+[
+  {
+    "url": "https://example.com/start",
+    "status": 302,
+    "headers": {
+      "location": "/articles/final"
+    },
+    "data": ""
+  },
+  {
+    "url": "https://example.com/articles/final",
+    "status": 200,
+    "headers": {
+      "content-type": "text/html; charset=utf-8"
+    },
+    "dataFixture": "clean-article.html"
+  }
+]

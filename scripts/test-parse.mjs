@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -29,6 +29,18 @@ const sampleArticle = {
   byline: "Sample author",
   siteName: "Sample site"
 };
+
+function loadFixture(name) {
+  return readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+}
+
+function loadJsonFixture(name) {
+  return JSON.parse(loadFixture(name));
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function withUrlPolicyEnv(env, callback) {
   const keys = ["ALLOW_PRIVATE_HOSTS", "ALLOWED_HOSTS", "BLOCKED_HOSTS"];
@@ -60,6 +72,75 @@ function withUrlPolicyEnv(env, callback) {
     }
   }
 }
+
+test("WebsiteParser extracts representative HTML fixtures across formats and truncation", async () => {
+  const cases = [
+    {
+      name: "clean-article.html",
+      url: "https://example.com/deep-work",
+      title: "Deep Work in Small Windows",
+      expectedMarkdown: [
+        "Most calendars are not built for concentration",
+        "The key is to name the one decision"
+      ],
+      absentMarkdown: ["Markets", "Copyright 2026"]
+    },
+    {
+      name: "boilerplate-heavy-intro.html",
+      url: "https://example.com/cities/maps",
+      title: "Sustainable Maps for Busy Cities",
+      expectedMarkdown: [
+        "City planners are updating street maps",
+        "quiet source of public frustration"
+      ],
+      absentMarkdown: ["Accept cookies", "Sponsored: smarter luggage", "Subscribe to our newsletter"]
+    },
+    {
+      name: "list-heavy-page.html",
+      url: "https://example.com/open-data/checklist",
+      title: "Checklist for Launching a Public Dataset",
+      expectedMarkdown: [
+        "## Before publication",
+        "*   Confirm every column has a plain-language definition.",
+        "1.  Record the first external question."
+      ],
+      absentMarkdown: []
+    }
+  ];
+
+  for (const fixtureCase of cases) {
+    const parser = new WebsiteParser({
+      httpClient: async () => ({
+        data: loadFixture(fixtureCase.name),
+        finalUrl: fixtureCase.url,
+        headers: { "content-type": "text/html" }
+      })
+    });
+
+    const markdownResult = await parser.fetchAndParse(fixtureCase.url);
+    assert.equal(markdownResult.title, fixtureCase.title);
+    assert.equal(markdownResult.metadata.format, "markdown");
+    assert.equal(markdownResult.metadata.permalink, fixtureCase.url);
+    assert.deepEqual(markdownResult.metadata.provider, { type: "web" });
+
+    for (const expected of fixtureCase.expectedMarkdown) {
+      assert.match(markdownResult.content, new RegExp(escapeRegExp(expected)));
+    }
+
+    for (const absent of fixtureCase.absentMarkdown) {
+      assert.doesNotMatch(markdownResult.content, new RegExp(escapeRegExp(absent)));
+    }
+
+    const htmlResult = await parser.fetchAndParse(fixtureCase.url, { format: "html" });
+    assert.match(htmlResult.content, /<article>|<p>/);
+    assert.equal(htmlResult.metadata.format, "html");
+
+    const textResult = await parser.fetchAndParse(fixtureCase.url, { format: "text", maxChars: 80 });
+    assert.equal(textResult.content.length, 80);
+    assert.equal(textResult.metadata.format, "text");
+    assert.equal(textResult.metadata.truncated, true);
+  }
+});
 
 test("renderArticleContent returns markdown by default", () => {
   const rendered = renderArticleContent(sampleArticle);
@@ -226,6 +307,20 @@ test("WebsiteParser validateUrl enforces default URL hygiene", () => {
   });
 });
 
+test("WebsiteParser rejects blocked and local URL fixtures", () => {
+  withUrlPolicyEnv({}, () => {
+    const parser = new WebsiteParser();
+    const blockedUrls = loadJsonFixture("blocked-local-urls.json");
+
+    for (const fixtureCase of blockedUrls) {
+      assert.throws(
+        () => parser.validateUrl(fixtureCase.url),
+        new RegExp(escapeRegExp(fixtureCase.message))
+      );
+    }
+  });
+});
+
 test("WebsiteParser validateUrl supports private-host escape hatch", () => {
   withUrlPolicyEnv({ ALLOW_PRIVATE_HOSTS: "true" }, () => {
     const parser = new WebsiteParser();
@@ -304,15 +399,42 @@ test("fetchWithPolicy blocks redirects to private hosts", async () => {
   assert.deepEqual(requestedUrls, ["https://example.com/start"]);
 });
 
+test("fetchWithPolicy follows fixture redirect chain and returns the final HTML response", async () => {
+  const responses = loadJsonFixture("redirect-chain.json");
+  const requestedUrls = [];
+
+  const response = await fetchWithPolicy("https://example.com/start", {
+    allowedContentTypes: new Set(["text/html"]),
+    requester: async (url) => {
+      requestedUrls.push(url);
+      const fixtureResponse = responses.find(item => item.url === url);
+      assert.ok(fixtureResponse, `Missing redirect fixture response for ${url}`);
+
+      return {
+        status: fixtureResponse.status,
+        headers: fixtureResponse.headers,
+        data: fixtureResponse.dataFixture
+          ? loadFixture(fixtureResponse.dataFixture)
+          : fixtureResponse.data
+      };
+    }
+  });
+
+  assert.deepEqual(requestedUrls, [
+    "https://example.com/start",
+    "https://example.com/articles/final"
+  ]);
+  assert.equal(response.finalUrl, "https://example.com/articles/final");
+  assert.match(response.data, /Deep Work in Small Windows/);
+});
+
 test("fetchWithPolicy rejects unsupported content types before parsing", async () => {
+  const fixtureResponse = loadJsonFixture("non-html-response.json");
+
   await assert.rejects(
     () => fetchWithPolicy("https://example.com/file.pdf", {
       allowedContentTypes: new Set(["text/html"]),
-      requester: async () => ({
-        status: 200,
-        headers: { "content-type": "application/pdf" },
-        data: "%PDF"
-      })
+      requester: async () => fixtureResponse
     }),
     /Unsupported response content type/
   );

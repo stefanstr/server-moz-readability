@@ -1,0 +1,9 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "data": {
+    "title": "Not an HTML page"
+  }
+}
