@@ -23,10 +23,12 @@ const SUPPORTED_FORMATS = new Set(['html', 'markdown', 'text']);
 export const TOOL_NAME = 'extract_web_content';
 const SERVER_VERSION = '2.0.0';
 const USER_AGENT = `make-content-parsable/${SERVER_VERSION} (+https://github.com/stefanstr/make-content-parsable)`;
-const DEFAULT_MAX_CHARS = -1;
+const UNLIMITED_MAX_CHARS = -1;
+const DEFAULT_MAX_CHARS = 50_000;
 const REDDIT_COMMENT_LIMIT = 20;
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+const MAX_RESPONSE_BYTES_LABEL = '5 MiB';
 const MAX_REDIRECTS = 5;
 const HTML_CONTENT_TYPES = new Set(['text/html', 'application/xhtml+xml']);
 const JSON_CONTENT_TYPES = new Set(['application/json', 'text/json']);
@@ -103,11 +105,11 @@ export function renderArticleContent(article, format = 'markdown') {
 export function truncateRenderedContent(content, maxChars) {
   const limit = maxChars ?? DEFAULT_MAX_CHARS;
 
-  if (!Number.isInteger(limit) || limit < -1) {
+  if (!Number.isInteger(limit) || limit < UNLIMITED_MAX_CHARS) {
     throw new Error('maxChars must be an integer greater than or equal to -1');
   }
 
-  if (limit === DEFAULT_MAX_CHARS) {
+  if (limit === UNLIMITED_MAX_CHARS) {
     return { content, truncated: false };
   }
 
@@ -260,6 +262,13 @@ function defaultHttpRequester(url, config) {
   return axios.get(url, config);
 }
 
+function isAxiosResponseSizeLimitError(error) {
+  const message = typeof error?.message === 'string' ? error.message : '';
+
+  return (axios.isAxiosError(error) || error?.name === 'AxiosError')
+    && /maxContentLength size of \d+ exceeded/.test(message);
+}
+
 function isRedirectStatus(status) {
   return status >= 300 && status < 400;
 }
@@ -274,19 +283,28 @@ export async function fetchWithPolicy(url, {
   let currentUrl = validateUrl(url);
 
   for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
-    const response = await requester(currentUrl, {
-      headers: {
-        'User-Agent': USER_AGENT
-      },
-      timeout: REQUEST_TIMEOUT_MS,
-      maxContentLength: MAX_RESPONSE_BYTES,
-      maxBodyLength: MAX_RESPONSE_BYTES,
-      maxRedirects: 0,
-      responseType,
-      httpAgent,
-      httpsAgent,
-      validateStatus: status => (status >= 200 && status < 300) || isRedirectStatus(status)
-    });
+    let response;
+    try {
+      response = await requester(currentUrl, {
+        headers: {
+          'User-Agent': USER_AGENT
+        },
+        timeout: REQUEST_TIMEOUT_MS,
+        maxContentLength: MAX_RESPONSE_BYTES,
+        maxBodyLength: MAX_RESPONSE_BYTES,
+        maxRedirects: 0,
+        responseType,
+        httpAgent,
+        httpsAgent,
+        validateStatus: status => (status >= 200 && status < 300) || isRedirectStatus(status)
+      });
+    } catch (error) {
+      if (isAxiosResponseSizeLimitError(error)) {
+        throw new PublicError(`Response exceeded maximum fetch size of ${MAX_RESPONSE_BYTES_LABEL}`);
+      }
+
+      throw error;
+    }
 
     if (isRedirectStatus(response.status)) {
       if (redirectCount === maxRedirects) {
@@ -691,7 +709,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         maxChars: {
           type: "integer",
           minimum: -1,
-          description: "Optional maximum number of characters to return after rendering. Defaults to -1, which means no limit."
+          description: "Optional maximum number of characters to return after rendering. Defaults to 50000. Use -1 for no limit."
         }
       },
       required: ["url"]

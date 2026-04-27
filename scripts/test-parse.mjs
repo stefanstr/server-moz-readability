@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  PublicError,
   RedditParser,
   TOOL_NAME,
   WebContentParser,
@@ -29,6 +30,8 @@ const sampleArticle = {
   byline: "Sample author",
   siteName: "Sample site"
 };
+
+const DEFAULT_OUTPUT_CHAR_LIMIT = 50_000;
 
 function loadFixture(name) {
   return readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
@@ -192,6 +195,19 @@ test("truncateRenderedContent clips after rendering and reports truncation", () 
   );
 });
 
+test("truncateRenderedContent applies the default output cap and supports unlimited override", () => {
+  const longContent = "x".repeat(DEFAULT_OUTPUT_CHAR_LIMIT + 1);
+  const defaultResult = truncateRenderedContent(longContent);
+
+  assert.equal(defaultResult.content.length, DEFAULT_OUTPUT_CHAR_LIMIT);
+  assert.equal(defaultResult.truncated, true);
+
+  assert.deepEqual(truncateRenderedContent(longContent, -1), {
+    content: longContent,
+    truncated: false
+  });
+});
+
 test("WebsiteParser fetchAndParse returns common metadata and supports maxChars", async () => {
   class StubParser extends WebsiteParser {
     async fetchArticle() {
@@ -228,6 +244,35 @@ test("WebsiteParser fetchAndParse returns common metadata and supports maxChars"
   const textResult = await parser.fetchAndParse("https://example.com/story", { format: "text", maxChars: 12 });
   assert.equal(textResult.content, "Story title ");
   assert.equal(textResult.metadata.truncated, true);
+});
+
+test("WebsiteParser applies the default output cap and lets maxChars disable it", async () => {
+  class LongArticleParser extends WebsiteParser {
+    async fetchArticle() {
+      return {
+        title: "Long story",
+        content: `<article><p>${"w".repeat(DEFAULT_OUTPUT_CHAR_LIMIT + 25)}</p></article>`,
+        excerpt: null,
+        byline: null,
+        siteName: null
+      };
+    }
+  }
+
+  const parser = new LongArticleParser();
+
+  const defaultResult = await parser.fetchAndParse("https://example.com/long-story", {
+    format: "text"
+  });
+  assert.equal(defaultResult.content.length, DEFAULT_OUTPUT_CHAR_LIMIT);
+  assert.equal(defaultResult.metadata.truncated, true);
+
+  const unlimitedResult = await parser.fetchAndParse("https://example.com/long-story", {
+    format: "text",
+    maxChars: -1
+  });
+  assert.equal(unlimitedResult.content.length, DEFAULT_OUTPUT_CHAR_LIMIT + 25);
+  assert.equal(unlimitedResult.metadata.truncated, false);
 });
 
 test("WebsiteParser fetchArticle runs validate, fetch, and extract stages", async () => {
@@ -376,6 +421,27 @@ test("fetchWithPolicy applies request limits and disables axios redirects", asyn
   assert.match(seenRequest.config.headers["User-Agent"], /^make-content-parsable\/2\.0\.0 /);
   assert.ok(seenRequest.config.httpAgent);
   assert.ok(seenRequest.config.httpsAgent);
+});
+
+test("fetchWithPolicy reports oversized responses as public errors", async () => {
+  const axiosError = Object.assign(new Error("maxContentLength size of 5242880 exceeded"), {
+    name: "AxiosError",
+    code: "ERR_BAD_RESPONSE"
+  });
+
+  await assert.rejects(
+    () => fetchWithPolicy("https://example.com/too-large", {
+      allowedContentTypes: new Set(["text/html"]),
+      requester: async () => {
+        throw axiosError;
+      }
+    }),
+    error => {
+      assert.ok(error instanceof PublicError);
+      assert.equal(error.message, "Response exceeded maximum fetch size of 5 MiB");
+      return true;
+    }
+  );
 });
 
 test("fetchWithPolicy blocks redirects to private hosts", async () => {
@@ -576,6 +642,36 @@ test("RedditParser fetchAndParse returns common metadata and respects maxChars",
       commentsTotal: 2
     }
   });
+});
+
+test("RedditParser applies the default output cap and lets maxChars disable it", async () => {
+  class LongRedditParser extends RedditParser {
+    async fetchRedditPost() {
+      return {
+        title: "Long Reddit title",
+        body: "r".repeat(DEFAULT_OUTPUT_CHAR_LIMIT + 25),
+        outboundUrl: null,
+        author: "u/poster",
+        subreddit: "test",
+        postId: "abc123",
+        permalink: "https://www.reddit.com/r/test/comments/abc123/title/",
+        commentsTotal: 0,
+        comments: []
+      };
+    }
+  }
+
+  const parser = new LongRedditParser();
+
+  const defaultResult = await parser.fetchAndParse("https://www.reddit.com/r/test/comments/abc123/title/");
+  assert.equal(defaultResult.content.length, DEFAULT_OUTPUT_CHAR_LIMIT);
+  assert.equal(defaultResult.metadata.truncated, true);
+
+  const unlimitedResult = await parser.fetchAndParse("https://www.reddit.com/r/test/comments/abc123/title/", {
+    maxChars: -1
+  });
+  assert.ok(unlimitedResult.content.length > DEFAULT_OUTPUT_CHAR_LIMIT);
+  assert.equal(unlimitedResult.metadata.truncated, false);
 });
 
 test("RedditParser rejects invalid redd.it post ids before fetching", async () => {

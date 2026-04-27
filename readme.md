@@ -7,6 +7,7 @@ An [model context protocol (MCP)](https://github.com/modelcontextprotocol) serve
 - Converts readable content into well-formatted Markdown, HTML, or plain text
 - Extracts public Reddit posts and top comments without OAuth
 - Returns stable metadata including permalink, provider type, excerpt, byline, and site name
+- Caps fetched responses and returned content to keep unexpectedly large pages predictable
 - Handles errors gracefully
 
 ## Why Not Just Fetch?
@@ -48,10 +49,12 @@ Use this when the user asks the model to read, summarize, quote, analyze, or ext
   "maxChars": {
     "type": "integer",
     "minimum": -1,
-    "description": "Optional character limit applied after rendering. Defaults to -1, which means no limit."
+    "description": "Optional character limit applied after rendering. Defaults to 50000. Use -1 for no limit."
   }
 }
 ```
+
+Fetched responses are capped at 5 MiB. If a response exceeds that limit, the tool returns a clear error instead of trying to parse the oversized body. Rendered content is capped at 50,000 characters by default before response formatting; pass `maxChars: -1` to return rendered content without this output cap.
 
 **Returns:**
 ```json
