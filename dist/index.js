@@ -32,6 +32,7 @@ const MAX_RESPONSE_BYTES_LABEL = '5 MiB';
 const MAX_REDIRECTS = 5;
 const HTML_CONTENT_TYPES = new Set(['text/html', 'application/xhtml+xml']);
 const JSON_CONTENT_TYPES = new Set(['application/json', 'text/json']);
+const DEFAULT_CONTENT_TYPE_ERROR_MESSAGE = 'Unsupported response content type';
 const LOCALHOST_NAMES = new Set(['localhost']);
 const PRIVATE_ADDRESS_BLOCK_LIST = createPrivateAddressBlockList();
 
@@ -189,7 +190,7 @@ function validateHttpUrl(url) {
   try {
     parsed = new URL(url);
   } catch {
-    throw new PublicError('URL must be a valid absolute URL');
+    throw new PublicError('Invalid URL');
   }
 
   const hostname = normalizeHostname(parsed.hostname);
@@ -197,7 +198,7 @@ function validateHttpUrl(url) {
   const allowedHosts = parseHostList(process.env.ALLOWED_HOSTS);
 
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new PublicError('URL must use http or https');
+    throw new PublicError('Invalid URL: URL must use http or https');
   }
 
   if (blockedHosts.has(hostname)) {
@@ -250,11 +251,11 @@ function normalizeContentType(value) {
   return (value ?? '').split(';', 1)[0].trim().toLowerCase();
 }
 
-function assertAllowedContentType(response, allowedContentTypes) {
+function assertAllowedContentType(response, allowedContentTypes, message = DEFAULT_CONTENT_TYPE_ERROR_MESSAGE) {
   const contentType = normalizeContentType(response.headers?.['content-type']);
 
   if (!contentType || !allowedContentTypes.has(contentType)) {
-    throw new PublicError('Unsupported response content type');
+    throw new PublicError(message);
   }
 }
 
@@ -269,6 +270,19 @@ function isAxiosResponseSizeLimitError(error) {
     && /maxContentLength size of \d+ exceeded/.test(message);
 }
 
+function isAxiosTimeoutError(error) {
+  const message = typeof error?.message === 'string' ? error.message : '';
+
+  return (axios.isAxiosError(error) || error?.name === 'AxiosError')
+    && (error?.code === 'ECONNABORTED'
+      || error?.code === 'ETIMEDOUT'
+      || /timeout of \d+ms exceeded/i.test(message));
+}
+
+function isAxiosFetchError(error) {
+  return axios.isAxiosError(error) || error?.name === 'AxiosError';
+}
+
 function isRedirectStatus(status) {
   return status >= 300 && status < 400;
 }
@@ -278,7 +292,8 @@ export async function fetchWithPolicy(url, {
   responseType = 'text',
   requester = defaultHttpRequester,
   validateUrl = validateHttpUrl,
-  maxRedirects = MAX_REDIRECTS
+  maxRedirects = MAX_REDIRECTS,
+  contentTypeErrorMessage = DEFAULT_CONTENT_TYPE_ERROR_MESSAGE
 } = {}) {
   let currentUrl = validateUrl(url);
 
@@ -303,6 +318,14 @@ export async function fetchWithPolicy(url, {
         throw new PublicError(`Response exceeded maximum fetch size of ${MAX_RESPONSE_BYTES_LABEL}`);
       }
 
+      if (isAxiosTimeoutError(error)) {
+        throw new PublicError('Request timed out');
+      }
+
+      if (isAxiosFetchError(error)) {
+        throw new PublicError('Failed to fetch web content');
+      }
+
       throw error;
     }
 
@@ -321,7 +344,7 @@ export async function fetchWithPolicy(url, {
     }
 
     if (allowedContentTypes) {
-      assertAllowedContentType(response, allowedContentTypes);
+      assertAllowedContentType(response, allowedContentTypes, contentTypeErrorMessage);
     }
 
     return {
@@ -379,6 +402,7 @@ export class WebsiteParser {
   async fetchHtml(url) {
     const response = await this.httpClient(url, {
       allowedContentTypes: HTML_CONTENT_TYPES,
+      contentTypeErrorMessage: 'Non-HTML response',
       responseType: 'text'
     });
 
@@ -403,16 +427,27 @@ export class WebsiteParser {
   }
 
   async fetchArticle(url) {
+    const validatedUrl = this.validateUrl(url);
+    let html;
+
     try {
-      const validatedUrl = this.validateUrl(url);
-      const html = await this.fetchHtml(validatedUrl);
-      return this.extractArticle(html, validatedUrl);
+      html = await this.fetchHtml(validatedUrl);
     } catch (error) {
       if (error instanceof PublicError) {
         throw error;
       }
 
       throw new PublicError('Failed to fetch web content');
+    }
+
+    try {
+      return this.extractArticle(html, validatedUrl);
+    } catch (error) {
+      if (error instanceof PublicError) {
+        throw error;
+      }
+
+      throw new PublicError('Failed to parse web content');
     }
   }
 
