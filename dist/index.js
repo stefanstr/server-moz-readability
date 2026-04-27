@@ -1,5 +1,9 @@
 #!/usr/bin/env node
+import { lookup as dnsLookup } from 'node:dns/promises';
 import { realpathSync } from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
+import { BlockList, isIP } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -17,8 +21,49 @@ const turndownService = new TurndownService({
 
 const SUPPORTED_FORMATS = new Set(['html', 'markdown', 'text']);
 export const TOOL_NAME = 'extract_web_content';
+const SERVER_VERSION = '2.0.0';
+const USER_AGENT = `make-content-parsable/${SERVER_VERSION} (+https://github.com/stefanstr/make-content-parsable)`;
 const DEFAULT_MAX_CHARS = -1;
 const REDDIT_COMMENT_LIMIT = 20;
+const REQUEST_TIMEOUT_MS = 10_000;
+const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+const MAX_REDIRECTS = 5;
+const HTML_CONTENT_TYPES = new Set(['text/html', 'application/xhtml+xml']);
+const JSON_CONTENT_TYPES = new Set(['application/json', 'text/json']);
+const LOCALHOST_NAMES = new Set(['localhost']);
+const PRIVATE_ADDRESS_BLOCK_LIST = createPrivateAddressBlockList();
+
+export class PublicError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'PublicError';
+  }
+}
+
+function createPrivateAddressBlockList() {
+  const blockList = new BlockList();
+
+  blockList.addSubnet('0.0.0.0', 8, 'ipv4');
+  blockList.addSubnet('10.0.0.0', 8, 'ipv4');
+  blockList.addSubnet('100.64.0.0', 10, 'ipv4');
+  blockList.addSubnet('127.0.0.0', 8, 'ipv4');
+  blockList.addSubnet('169.254.0.0', 16, 'ipv4');
+  blockList.addSubnet('172.16.0.0', 12, 'ipv4');
+  blockList.addSubnet('192.0.0.0', 24, 'ipv4');
+  blockList.addSubnet('192.168.0.0', 16, 'ipv4');
+  blockList.addSubnet('198.18.0.0', 15, 'ipv4');
+  blockList.addSubnet('224.0.0.0', 4, 'ipv4');
+  blockList.addSubnet('240.0.0.0', 4, 'ipv4');
+  blockList.addAddress('255.255.255.255', 'ipv4');
+
+  blockList.addAddress('::', 'ipv6');
+  blockList.addAddress('::1', 'ipv6');
+  blockList.addSubnet('fc00::', 7, 'ipv6');
+  blockList.addSubnet('fe80::', 10, 'ipv6');
+  blockList.addSubnet('ff00::', 8, 'ipv6');
+
+  return blockList;
+}
 
 function normalizeWhitespace(value) {
   return value.replace(/\s+/g, ' ').trim();
@@ -96,6 +141,201 @@ function buildMetadata({
   };
 }
 
+function parseHostList(value) {
+  return new Set((value ?? '')
+    .split(',')
+    .map(host => host.trim().toLowerCase())
+    .filter(Boolean));
+}
+
+function isEnabled(value) {
+  return ['1', 'true', 'yes'].includes((value ?? '').trim().toLowerCase());
+}
+
+function normalizeHostname(hostname) {
+  return hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1');
+}
+
+function blockListType(address) {
+  const family = isIP(address);
+  return family === 4 ? 'ipv4' : family === 6 ? 'ipv6' : null;
+}
+
+function parseIpv4MappedIpv6(address) {
+  return address.toLowerCase().match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1] ?? null;
+}
+
+function isBlockedIpAddress(address) {
+  const mappedIpv4 = parseIpv4MappedIpv6(address);
+  if (mappedIpv4) {
+    return isBlockedIpAddress(mappedIpv4);
+  }
+
+  const type = blockListType(address);
+  return type ? PRIVATE_ADDRESS_BLOCK_LIST.check(address, type) : false;
+}
+
+function isPrivateHostname(hostname) {
+  const normalized = normalizeHostname(hostname);
+  return LOCALHOST_NAMES.has(normalized)
+    || normalized.endsWith('.localhost')
+    || isBlockedIpAddress(normalized);
+}
+
+function validateHttpUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new PublicError('URL must be a valid absolute URL');
+  }
+
+  const hostname = normalizeHostname(parsed.hostname);
+  const blockedHosts = parseHostList(process.env.BLOCKED_HOSTS);
+  const allowedHosts = parseHostList(process.env.ALLOWED_HOSTS);
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new PublicError('URL must use http or https');
+  }
+
+  if (blockedHosts.has(hostname)) {
+    throw new PublicError(`Host is blocked by policy: ${hostname}`);
+  }
+
+  if (allowedHosts.size > 0 && !allowedHosts.has(hostname)) {
+    throw new PublicError(`Host is not allowed by policy: ${hostname}`);
+  }
+
+  if (!isEnabled(process.env.ALLOW_PRIVATE_HOSTS) && isPrivateHostname(hostname)) {
+    throw new PublicError(`Private or local hosts are blocked by policy: ${hostname}`);
+  }
+
+  return parsed.toString();
+}
+
+function assertAllowedResolvedAddresses(hostname, addresses) {
+  if (isEnabled(process.env.ALLOW_PRIVATE_HOSTS)) {
+    return;
+  }
+
+  for (const entry of addresses) {
+    if (isBlockedIpAddress(entry.address)) {
+      throw new PublicError(`Private or local hosts are blocked by policy: ${normalizeHostname(hostname)}`);
+    }
+  }
+}
+
+function safeLookup(hostname, options, callback) {
+  dnsLookup(hostname, { ...options, all: true })
+    .then(addresses => {
+      assertAllowedResolvedAddresses(hostname, addresses);
+
+      if (options?.all) {
+        callback(null, addresses);
+        return;
+      }
+
+      const [firstAddress] = addresses;
+      callback(null, firstAddress.address, firstAddress.family);
+    })
+    .catch(callback);
+}
+
+const httpAgent = new http.Agent({ lookup: safeLookup });
+const httpsAgent = new https.Agent({ lookup: safeLookup });
+
+function normalizeContentType(value) {
+  return (value ?? '').split(';', 1)[0].trim().toLowerCase();
+}
+
+function assertAllowedContentType(response, allowedContentTypes) {
+  const contentType = normalizeContentType(response.headers?.['content-type']);
+
+  if (!contentType || !allowedContentTypes.has(contentType)) {
+    throw new PublicError('Unsupported response content type');
+  }
+}
+
+function defaultHttpRequester(url, config) {
+  return axios.get(url, config);
+}
+
+function isRedirectStatus(status) {
+  return status >= 300 && status < 400;
+}
+
+export async function fetchWithPolicy(url, {
+  allowedContentTypes,
+  responseType = 'text',
+  requester = defaultHttpRequester,
+  validateUrl = validateHttpUrl,
+  maxRedirects = MAX_REDIRECTS
+} = {}) {
+  let currentUrl = validateUrl(url);
+
+  for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
+    const response = await requester(currentUrl, {
+      headers: {
+        'User-Agent': USER_AGENT
+      },
+      timeout: REQUEST_TIMEOUT_MS,
+      maxContentLength: MAX_RESPONSE_BYTES,
+      maxBodyLength: MAX_RESPONSE_BYTES,
+      maxRedirects: 0,
+      responseType,
+      httpAgent,
+      httpsAgent,
+      validateStatus: status => (status >= 200 && status < 300) || isRedirectStatus(status)
+    });
+
+    if (isRedirectStatus(response.status)) {
+      if (redirectCount === maxRedirects) {
+        throw new PublicError('Too many redirects');
+      }
+
+      const location = response.headers?.location;
+      if (!location) {
+        throw new PublicError('Redirect response did not include a Location header');
+      }
+
+      currentUrl = validateUrl(new URL(location, currentUrl).toString());
+      continue;
+    }
+
+    if (allowedContentTypes) {
+      assertAllowedContentType(response, allowedContentTypes);
+    }
+
+    return {
+      data: response.data,
+      finalUrl: currentUrl,
+      headers: response.headers
+    };
+  }
+
+  throw new PublicError('Too many redirects');
+}
+
+function shapeWebResponse(article, url, options = {}) {
+  const format = options.format ?? 'markdown';
+  const renderedContent = renderArticleContent(article, format);
+  const { content, truncated } = truncateRenderedContent(renderedContent, options.maxChars);
+
+  return {
+    title: article.title,
+    content,
+    metadata: buildMetadata({
+      format,
+      excerpt: article.excerpt,
+      byline: article.byline,
+      siteName: article.siteName,
+      truncated,
+      permalink: url,
+      provider: { type: 'web' }
+    })
+  };
+}
+
 export function isRedditUrl(url) {
   try {
     const parsed = new URL(url);
@@ -110,48 +350,57 @@ export function isRedditUrl(url) {
 }
 
 export class WebsiteParser {
+  constructor({ httpClient = fetchWithPolicy } = {}) {
+    this.httpClient = httpClient;
+  }
+
+  validateUrl(url) {
+    return validateHttpUrl(url);
+  }
+
+  async fetchHtml(url) {
+    const response = await this.httpClient(url, {
+      allowedContentTypes: HTML_CONTENT_TYPES,
+      responseType: 'text'
+    });
+
+    return response.data;
+  }
+
+  extractArticle(html, url) {
+    const dom = new JSDOM(html, { url });
+    const document = dom.window.document;
+    const reader = new Readability(document);
+    const article = reader.parse();
+
+    if (!article) {
+      throw new PublicError('Failed to parse web content');
+    }
+
+    return article;
+  }
+
+  shapeResponse(article, url, options = {}) {
+    return shapeWebResponse(article, url, options);
+  }
+
   async fetchArticle(url) {
     try {
-      const response = await axios.get(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; MCPBot/1.0)'
-        }
-      });
-
-      const dom = new JSDOM(response.data, { url });
-      const document = dom.window.document;
-      const reader = new Readability(document);
-      const article = reader.parse();
-
-      if (!article) {
-        throw new Error('Failed to parse content');
+      const validatedUrl = this.validateUrl(url);
+      const html = await this.fetchHtml(validatedUrl);
+      return this.extractArticle(html, validatedUrl);
+    } catch (error) {
+      if (error instanceof PublicError) {
+        throw error;
       }
 
-      return article;
-    } catch (error) {
-      throw new Error(`Failed to fetch or parse content: ${error.message}`);
+      throw new PublicError('Failed to fetch web content');
     }
   }
 
   async fetchAndParse(url, options = {}) {
     const article = await this.fetchArticle(url);
-    const format = options.format ?? 'markdown';
-    const renderedContent = renderArticleContent(article, format);
-    const { content, truncated } = truncateRenderedContent(renderedContent, options.maxChars);
-
-    return {
-      title: article.title,
-      content,
-      metadata: buildMetadata({
-        format,
-        excerpt: article.excerpt,
-        byline: article.byline,
-        siteName: article.siteName,
-        truncated,
-        permalink: url,
-        provider: { type: 'web' }
-      })
-    };
+    return this.shapeResponse(article, url, options);
   }
 }
 
@@ -162,7 +411,11 @@ function normalizeRedditJsonUrl(url) {
   if (hostname === 'redd.it') {
     const postId = parsed.pathname.split('/').filter(Boolean)[0];
     if (!postId) {
-      throw new Error('Reddit short URL must include a post id');
+      throw new PublicError('Reddit short URL must include a post id');
+    }
+
+    if (!/^[A-Za-z0-9]+$/.test(postId)) {
+      throw new PublicError('Reddit short URL has an invalid post id');
     }
 
     const jsonUrl = new URL(`https://www.reddit.com/comments/${postId}.json`);
@@ -184,6 +437,17 @@ function normalizeRedditJsonUrl(url) {
   parsed.searchParams.set('sort', 'top');
   parsed.searchParams.set('limit', String(REDDIT_COMMENT_LIMIT));
   return parsed.toString();
+}
+
+function validateRedditJsonHttpUrl(url) {
+  const validatedUrl = validateHttpUrl(url);
+  const hostname = new URL(validatedUrl).hostname.toLowerCase();
+
+  if (hostname !== 'www.reddit.com') {
+    throw new PublicError('Reddit redirects must stay on www.reddit.com');
+  }
+
+  return validatedUrl;
 }
 
 function flattenTopLevelComments(children, limit = REDDIT_COMMENT_LIMIT) {
@@ -329,17 +593,25 @@ export function renderRedditContent(post, format = 'markdown') {
 }
 
 export class RedditParser {
+  constructor({ httpClient = fetchWithPolicy } = {}) {
+    this.httpClient = httpClient;
+  }
+
   async fetchRedditPost(url) {
     try {
-      const response = await axios.get(normalizeRedditJsonUrl(url), {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; MCPBot/1.0)'
-        }
+      const response = await this.httpClient(normalizeRedditJsonUrl(url), {
+        allowedContentTypes: JSON_CONTENT_TYPES,
+        responseType: 'json',
+        validateUrl: validateRedditJsonHttpUrl
       });
 
       return parseRedditResponse(response.data);
     } catch (error) {
-      throw new Error(`Failed to fetch or parse Reddit content: ${error.message}`);
+      if (error instanceof PublicError) {
+        throw error;
+      }
+
+      throw new PublicError('Failed to fetch Reddit content');
     }
   }
 
@@ -392,7 +664,7 @@ export class WebContentParser {
 // Create MCP server instance
 const server = new Server({
   name: "make-content-parsable",
-  version: "1.0.0"
+  version: SERVER_VERSION
 }, {
   capabilities: { tools: {} }
 });
@@ -435,7 +707,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
   }
 
-  if (!args?.url) {
+  if (typeof args?.url !== 'string' || args.url.trim() === '') {
     throw new McpError(ErrorCode.InvalidParams, "URL is required");
   }
 
@@ -448,7 +720,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   try {
-    const result = await parser.fetchAndParse(args.url, {
+    const url = args.url.trim();
+    const result = await parser.fetchAndParse(url, {
       format: args.format,
       maxChars: args.maxChars
     });
@@ -464,11 +737,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }]
     };
   } catch (error) {
+    const message = error instanceof PublicError ? error.message : 'Failed to extract web content';
+
     return {
       isError: true,
       content: [{
         type: "text",
-        text: `Error: ${error.message}`
+        text: `Error: ${message}`
       }]
     };
   }
